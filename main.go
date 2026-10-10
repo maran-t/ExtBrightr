@@ -71,8 +71,7 @@ type app struct {
 	fontScale float64
 	fonts     [3]uintptr
 
-	framed  bool // the flyout has an (invisible) DWM frame: Windows 11
-	acrylic bool // the flyout has the Windows 11 acrylic backdrop
+	framed bool // the flyout has an (invisible) DWM frame: Windows 11
 
 	// The opening slide: the flyout rises from the taskbar into place.
 	sliding     bool
@@ -172,8 +171,7 @@ func (a *app) createWindows() {
 	// On Windows 11 the flyout is a framed window whose frame has no size
 	// (see WM_NCCALCSIZE in flyProc): DWM gives only framed windows its own
 	// shadow, which is drawn with the window and so moves with it while it
-	// slides, and only framed windows get the acrylic backdrop. Windows 10
-	// keeps the class shadow.
+	// slides. Windows 10 keeps the class shadow.
 	a.framed = a.rounded()
 	flyClassStyle := uint32(0)
 	if !a.framed {
@@ -212,45 +210,24 @@ func (a *app) createWindows() {
 }
 
 // setupFrame sets up the Windows 11 flyout's DWM frame: rounded corners,
-// no DWM border (renderFlyout draws its own), no DWM open/close animation
-// (the flyout slides itself), and, from build 22621, the acrylic backdrop of
-// the Windows 11 flyouts (Quick Settings, the calendar). For acrylic the
-// whole client area is made "frame", so DWM draws the backdrop behind it and
-// composites the flyout's pixels by their alpha; otherwise a 1-pixel frame
-// keeps the DWM shadow on a window with no visible frame.
+// no DWM border (renderFlyout draws its own) and no DWM open/close
+// animation (the flyout slides itself). A 1-pixel frame keeps the DWM
+// shadow on a window with no visible frame.
 func (a *app) setupFrame() {
-	set := func(attr uintptr, v uint32) uintptr {
-		hr, _, _ := pDwmSetWindowAttribute.Call(a.hwndFly, attr, uintptr(unsafe.Pointer(&v)), 4)
-		return hr
+	set := func(attr uintptr, v uint32) {
+		pDwmSetWindowAttribute.Call(a.hwndFly, attr, uintptr(unsafe.Pointer(&v)), 4)
 	}
 	set(dwmwaTransitionsOff, 1)
 	set(dwmwaCornerPreference, dwmwcpRound)
 	set(dwmwaBorderColor, dwmColorNone)
-	a.setBackdropTheme()
 
 	if available(pDwmExtendFrame) {
 		margins := [4]int32{1, 1, 1, 1} // MARGINS
-		if a.build >= 22621 && set(dwmwaSystemBackdrop, dwmsbtTransient) == 0 {
-			margins = [4]int32{-1, -1, -1, -1}
-			a.acrylic = true
-		}
-		if hr, _, _ := pDwmExtendFrame.Call(a.hwndFly, uintptr(unsafe.Pointer(&margins))); hr != 0 && a.acrylic {
-			a.acrylic = false
-			set(dwmwaSystemBackdrop, dwmsbtNone)
-		}
+		pDwmExtendFrame.Call(a.hwndFly, uintptr(unsafe.Pointer(&margins)))
 	}
 	// Recalculate the (empty) frame now; this also makes DWM pick up the
 	// attributes above.
 	pSetWindowPos.Call(a.hwndFly, 0, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoZOrder|swpNoActivate|swpFrameChanged)
-}
-
-// setBackdropTheme picks the light or dark acrylic to match the taskbar.
-func (a *app) setBackdropTheme() {
-	on := uint32(0)
-	if a.dark {
-		on = 1
-	}
-	pDwmSetWindowAttribute.Call(a.hwndFly, dwmwaUseDarkMode, uintptr(unsafe.Pointer(&on)), 4)
 }
 
 // rounded: Windows 11 rounds top-level windows; Windows 10 keeps them square.
@@ -337,9 +314,6 @@ func (a *app) reloadTheme() {
 		a.updateTray()
 		if old != 0 {
 			pDestroyIcon.Call(old)
-		}
-		if a.acrylic {
-			a.setBackdropTheme()
 		}
 	}
 	a.accent = accent
@@ -758,13 +732,9 @@ func (a *app) ensureFonts() {
 // silently substitutes when a face is missing, so check what it really gave.
 func (a *app) makeFont(sizeDip float64, weight uintptr) uintptr {
 	height := int32(-(sizeDip*a.scale + 0.5))
-	quality := uintptr(cleartypeQual)
-	if a.acrylic {
-		quality = antialiasQual
-	}
 	create := func(face string) uintptr {
 		f, _, _ := pCreateFontW.Call(uintptr(height), 0, 0, 0, weight, 0, 0, 0, defaultCharset,
-			0, 0, quality, 0, uintptr(unsafe.Pointer(utf16(face))))
+			0, 0, cleartypeQual, 0, uintptr(unsafe.Pointer(utf16(face))))
 		return f
 	}
 	if a.rounded() {
@@ -811,7 +781,7 @@ func (a *app) paint(hwnd uintptr) {
 	defer pSelectObject.Call(mem, oldBmp)
 
 	model := &flyModel{
-		dark: a.dark, rounded: a.rounded(), acrylic: a.acrylic, accent: a.accent, scale: a.scale,
+		dark: a.dark, rounded: a.rounded(), accent: a.accent, scale: a.scale,
 		rows: make([]rowModel, len(a.rows)), hover: a.hover, press: a.drag, focus: -1,
 	}
 	if a.keyboard {
@@ -825,28 +795,12 @@ func (a *app) paint(hwnd uintptr) {
 
 	a.ensureFonts()
 	pGdiFlush.Call()
-	if a.acrylic {
-		a.drawTextMasked(hdc, cv, texts)
-	} else {
-		a.drawTexts(mem, texts, false)
-	}
-
-	pBitBlt.Call(hdc, 0, 0, uintptr(w), uintptr(h), mem, 0, 0, srcCopy)
-}
-
-// drawTexts draws the strings with GDI, in their own colours or, for a text
-// mask, all in white.
-func (a *app) drawTexts(dc uintptr, texts []textItem, mask bool) {
-	pSetBkMode.Call(dc, bkTransparent)
-	oldFont, _, _ := pSelectObject.Call(dc, a.fonts[styleBody])
+	pSetBkMode.Call(mem, bkTransparent)
+	oldFont, _, _ := pSelectObject.Call(mem, a.fonts[styleBody])
 	for i := range texts {
 		t := &texts[i]
-		pSelectObject.Call(dc, a.fonts[t.style])
-		col := t.col
-		if mask {
-			col = white
-		}
-		pSetTextColor.Call(dc, colorref(col))
+		pSelectObject.Call(mem, a.fonts[t.style])
+		pSetTextColor.Call(mem, colorref(t.col))
 		flags := uintptr(dtNoPrefix)
 		switch t.align {
 		case alignLeft:
@@ -856,35 +810,11 @@ func (a *app) drawTexts(dc uintptr, texts []textItem, mask bool) {
 		case alignCenterWrap:
 			flags |= dtCenter | dtWordBreak
 		}
-		pDrawTextW.Call(dc, uintptr(unsafe.Pointer(utf16(t.s))), ^uintptr(0), uintptr(unsafe.Pointer(&t.box)), flags)
+		pDrawTextW.Call(mem, uintptr(unsafe.Pointer(utf16(t.s))), ^uintptr(0), uintptr(unsafe.Pointer(&t.box)), flags)
 	}
-	pSelectObject.Call(dc, oldFont)
-}
+	pSelectObject.Call(mem, oldFont)
 
-// drawTextMasked puts the text on the acrylic flyout: drawn white on black
-// into a mask, then blended into the canvas in its own colours.
-func (a *app) drawTextMasked(hdc uintptr, cv *canvas, texts []textItem) {
-	bi := bitmapInfoHeader{biWidth: int32(cv.w), biHeight: -int32(cv.h), biPlanes: 1, biBitCount: 32}
-	bi.biSize = uint32(unsafe.Sizeof(bi))
-	var bits unsafe.Pointer
-	bmp, _, _ := pCreateDIBSection.Call(hdc, uintptr(unsafe.Pointer(&bi)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
-	if bmp == 0 || bits == nil {
-		return
-	}
-	defer pDeleteObject.Call(bmp)
-	dc, _, _ := pCreateCompatibleDC.Call(hdc)
-	defer pDeleteDC.Call(dc)
-	old, _, _ := pSelectObject.Call(dc, bmp)
-	defer pSelectObject.Call(dc, old)
-
-	mask := unsafe.Slice((*byte)(bits), cv.w*cv.h*4)
-	clear(mask)
-	a.drawTexts(dc, texts, true)
-	pGdiFlush.Call()
-	for i := range texts {
-		t := &texts[i]
-		cv.blendText(mask, t.box, t.col, t.alpha)
-	}
+	pBitBlt.Call(hdc, 0, 0, uintptr(w), uintptr(h), mem, 0, 0, srcCopy)
 }
 
 func keyDown(vk uintptr) bool {

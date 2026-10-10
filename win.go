@@ -192,7 +192,6 @@ const (
 	bkTransparent  = 1
 	srcCopy        = 0x00CC0020
 	cleartypeQual  = 5
-	antialiasQual  = 4 // greyscale: ClearType needs an opaque background
 	defaultCharset = 1
 
 	hkeyCurrentUser = 0x80000001
@@ -203,14 +202,10 @@ const (
 	rrfRtRegDword   = 0x00000010
 
 	dwmwaTransitionsOff   = 3 // DWMWA_TRANSITIONS_FORCEDISABLED
-	dwmwaUseDarkMode      = 20
 	dwmwaCornerPreference = 33
 	dwmwaBorderColor      = 34
-	dwmwaSystemBackdrop   = 38
 	dwmwcpRound           = 2
 	dwmColorNone          = 0xFFFFFFFE
-	dwmsbtNone            = 1
-	dwmsbtTransient       = 3 // Desktop Acrylic, as used by Windows 11 flyouts
 
 	spiGetClientAreaAnimation = 0x1042
 )

@@ -12,9 +12,6 @@ import (
 
 type rgb struct{ r, g, b uint8 }
 
-// canvas holds premultiplied BGRA. On the opaque flyout every pixel keeps
-// alpha 255; on the acrylic one the background is left transparent so the
-// system backdrop shows through, and DWM composites what is drawn on top.
 type canvas struct {
 	pix  []byte // BGRA, top-down, 4 bytes per pixel
 	w, h int
@@ -44,20 +41,6 @@ func (c *canvas) fill(col rgb) {
 	}
 }
 
-// clear makes every pixel fully transparent.
-func (c *canvas) clear() {
-	clear(c.pix)
-}
-
-// over composites col at opacity a onto pixel i ("source over", with
-// premultiplied alpha). On an opaque pixel it is a plain blend.
-func (c *canvas) over(i int, col rgb, a float64) {
-	c.pix[i] = mix8(c.pix[i], col.b, a)
-	c.pix[i+1] = mix8(c.pix[i+1], col.g, a)
-	c.pix[i+2] = mix8(c.pix[i+2], col.r, a)
-	c.pix[i+3] = mix8(c.pix[i+3], 255, a)
-}
-
 // shade blends col over every pixel in the box, weighted by cover(px, py),
 // which is evaluated at pixel centres.
 func (c *canvas) shade(x0, y0, x1, y1 float64, col rgb, alpha float64, cover func(px, py float64) float64) {
@@ -81,34 +64,10 @@ func (c *canvas) shade(x0, y0, x1, y1 float64, col rgb, alpha float64, cover fun
 			if a <= 0 {
 				continue
 			}
-			c.over((y*c.w+x)*4, col, a)
-		}
-	}
-}
-
-// blendText paints col through a text mask: GDI's text rendered white on
-// black into a BGRA buffer the size of the canvas. GDI cannot draw text onto
-// a transparent surface itself (it writes alpha 0), so on the acrylic flyout
-// the text is drawn into the mask and composited here, box by box so each
-// string keeps its own colour.
-func (c *canvas) blendText(mask []byte, box rect, col rgb, alpha float64) {
-	x0, y0 := max(int(box.left), 0), max(int(box.top), 0)
-	x1, y1 := min(int(box.right), c.w), min(int(box.bottom), c.h)
-	// The mask's coverage is gamma-shaped for light text on dark; dark text
-	// on a light backdrop needs a little more weight to look the same.
-	dark := int(col.r)+int(col.g)+int(col.b) < 3*128
-	for y := y0; y < y1; y++ {
-		for x := x0; x < x1; x++ {
 			i := (y*c.w + x) * 4
-			m := max(mask[i], mask[i+1], mask[i+2])
-			if m == 0 {
-				continue
-			}
-			cov := float64(m) / 255
-			if dark {
-				cov = math.Pow(cov, 0.8)
-			}
-			c.over(i, col, cov*alpha)
+			c.pix[i] = mix8(c.pix[i], col.b, a)
+			c.pix[i+1] = mix8(c.pix[i+1], col.g, a)
+			c.pix[i+2] = mix8(c.pix[i+2], col.r, a)
 		}
 	}
 }
@@ -272,7 +231,6 @@ type textItem struct {
 	box   rect
 	s     string
 	col   rgb
-	alpha float64 // used on the acrylic flyout; the opaque one bakes it into col
 	style int
 	align int
 }
@@ -285,7 +243,6 @@ type rowModel struct {
 type flyModel struct {
 	dark    bool
 	rounded bool // Windows 11: DWM rounds the window, so round the border too
-	acrylic bool // the system backdrop shows through a transparent background
 	accent  rgb
 	scale   float64
 	rows    []rowModel
@@ -299,9 +256,7 @@ type palette struct {
 	border     rgb
 	borderA    float64
 	text       rgb
-	textA      float64
 	text2      rgb
-	text2A     float64
 	track      rgb
 	trackA     float64
 	thumb      rgb
@@ -316,39 +271,25 @@ var (
 	black = rgb{0, 0, 0}
 )
 
-// paletteFor returns the Windows 11 flyout colours. Text is a white or black
-// ink at the opacity of the TextFillColorPrimary/Secondary brushes; on the
-// opaque flyout that is pre-mixed with the background (GDI draws text in solid
-// colours), on the acrylic one it stays translucent so the backdrop shows.
-func paletteFor(dark bool, accent rgb, acrylic bool) palette {
-	var p palette
-	var ink rgb
+func paletteFor(dark bool, accent rgb) palette {
 	if dark {
-		ink = white
-		p = palette{
-			bg: rgb{0x2C, 0x2C, 0x2C}, border: white, borderA: 0.10,
-			textA: 1, text2A: 0.786,
+		bg := rgb{0x2C, 0x2C, 0x2C}
+		return palette{
+			bg: bg, border: white, borderA: 0.10,
+			text: white, text2: mixRGB(bg, white, 0.786),
 			track: white, trackA: 0.544,
 			thumb: rgb{0x45, 0x45, 0x45}, thumbRingA: 0.10, shadowA: 0.22,
 			focusA: 0.06, accent: accent,
 		}
-	} else {
-		ink = black
-		p = palette{
-			bg: rgb{0xF3, 0xF3, 0xF3}, border: black, borderA: 0.14,
-			textA: 0.896, text2A: 0.62,
-			track: black, trackA: 0.446,
-			thumb: white, thumbRingA: 0.08, shadowA: 0.12,
-			focusA: 0.045, accent: accent,
-		}
 	}
-	if acrylic {
-		p.text, p.text2 = ink, ink
-	} else {
-		p.text, p.text2 = mixRGB(p.bg, ink, p.textA), mixRGB(p.bg, ink, p.text2A)
-		p.textA, p.text2A = 1, 1
+	bg := rgb{0xF3, 0xF3, 0xF3}
+	return palette{
+		bg: bg, border: black, borderA: 0.14,
+		text: mixRGB(bg, black, 0.896), text2: mixRGB(bg, black, 0.62),
+		track: black, trackA: 0.446,
+		thumb: white, thumbRingA: 0.08, shadowA: 0.12,
+		focusA: 0.045, accent: accent,
 	}
-	return p
 }
 
 // defaultAccent is what Windows ships with, used when the user's accent
@@ -427,15 +368,11 @@ const (
 func px(v float64) int32 { return int32(math.Round(v)) }
 
 func renderFlyout(cv *canvas, m *flyModel) []textItem {
-	p := paletteFor(m.dark, m.accent, m.acrylic)
+	p := paletteFor(m.dark, m.accent)
 	s := m.scale
 	W, H := float64(cv.w), float64(cv.h)
 
-	if m.acrylic {
-		cv.clear()
-	} else {
-		cv.fill(p.bg)
-	}
+	cv.fill(p.bg)
 	radius := 0.0
 	if m.rounded {
 		radius = 8 * s
@@ -444,10 +381,10 @@ func renderFlyout(cv *canvas, m *flyModel) []textItem {
 
 	var texts []textItem
 	if len(m.rows) == 0 {
-		cv.sun(W/2, 30*s, 22*s, p.text2, p.text2A)
+		cv.sun(W/2, 30*s, 22*s, p.text2, 1)
 		texts = append(texts,
-			textItem{rect{px(padX * s), px(46 * s), px(W - padX*s), px(68 * s)}, emptyTitle, p.text, p.textA, styleTitle, alignCenterWrap},
-			textItem{rect{px(padX * s), px(68 * s), px(W - padX*s), px(H - 8*s)}, emptyBody, p.text2, p.text2A, styleSmall, alignCenterWrap},
+			textItem{rect{px(padX * s), px(46 * s), px(W - padX*s), px(68 * s)}, emptyTitle, p.text, styleTitle, alignCenterWrap},
+			textItem{rect{px(padX * s), px(68 * s), px(W - padX*s), px(H - 8*s)}, emptyBody, p.text2, styleSmall, alignCenterWrap},
 		)
 		return texts
 	}
@@ -460,11 +397,11 @@ func renderFlyout(cv *canvas, m *flyModel) []textItem {
 
 		split := (flyW - padX - valueW) * s
 		texts = append(texts,
-			textItem{rect{px(padX * s), px(g.top + 4*s), px(split - 8*s), px(g.top + 28*s)}, r.name, p.text, p.textA, styleTitle, alignLeft},
-			textItem{rect{px(split), px(g.top + 4*s), px((flyW - padX) * s), px(g.top + 28*s)}, strconv.Itoa(r.pct) + "%", p.text2, p.text2A, styleBody, alignRight},
+			textItem{rect{px(padX * s), px(g.top + 4*s), px(split - 8*s), px(g.top + 28*s)}, r.name, p.text, styleTitle, alignLeft},
+			textItem{rect{px(split), px(g.top + 4*s), px((flyW - padX) * s), px(g.top + 28*s)}, strconv.Itoa(r.pct) + "%", p.text2, styleBody, alignRight},
 		)
 
-		cv.sun((padX+glyphBox/2)*s, g.cy, glyphBox*s, p.text2, p.text2A)
+		cv.sun((padX+glyphBox/2)*s, g.cy, glyphBox*s, p.text2, 1)
 
 		half := 2 * s
 		tx := thumbX(g, r.pct)
