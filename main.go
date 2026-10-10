@@ -22,6 +22,7 @@ const (
 	msgTray     = wmApp + 1 // tray icon callback
 	msgMonitors = wmApp + 2 // the DDC worker published a new snapshot
 	msgSlide    = wmApp + 3 // next frame of the opening slide
+	msgRedraw   = wmApp + 4 // draw the flyout (see invalidate)
 
 	timerRescan = 1
 
@@ -68,8 +69,9 @@ type app struct {
 	tracking bool
 	wheelAcc int
 
-	fontScale float64
-	fonts     [3]uintptr
+	fontScale     float64
+	fonts         [3]uintptr
+	redrawPending bool
 
 	// The opening slide: the flyout rises from the taskbar into place.
 	sliding     bool
@@ -166,8 +168,10 @@ func (a *app) createWindows() {
 	mainClass.cbSize = uint32(unsafe.Sizeof(mainClass))
 	pRegisterClassExW.Call(uintptr(unsafe.Pointer(&mainClass)))
 
-	// No shadow: the class shadow (CS_DROPSHADOW) is a separate window that
-	// does not follow the flyout while it slides and pops in when it lands.
+	// No shadow of any kind: the class shadow (CS_DROPSHADOW) is a separate
+	// window that does not follow the flyout while it slides, and DWM shadows
+	// the windows it rounds, so the flyout is a layered window with its
+	// corners cut out by redraw.
 	flyClass := wndClassEx{
 		lpfnWndProc:   syscall.NewCallback(flyProc),
 		hInstance:     a.hInst,
@@ -183,22 +187,15 @@ func (a *app) createWindows() {
 		uintptr(unsafe.Pointer(utf16(classMain))), uintptr(unsafe.Pointer(utf16(appTitle))),
 		wsPopup, 0, 0, 0, 0, 0, 0, a.hInst, 0)
 
-	a.hwndFly, _, _ = pCreateWindowExW.Call(wsExToolWindow|wsExTopmost,
+	a.hwndFly, _, _ = pCreateWindowExW.Call(wsExLayered|wsExToolWindow|wsExTopmost,
 		uintptr(unsafe.Pointer(utf16(classFlyout))), uintptr(unsafe.Pointer(utf16(appTitle))),
 		wsPopup, 0, 0, 10, 10, a.hwndMain, 0, a.hInst, 0)
-
-	if a.rounded() && available(pDwmSetWindowAttribute) {
-		corner := uint32(dwmwcpRound)
-		pDwmSetWindowAttribute.Call(a.hwndFly, dwmwaCornerPreference, uintptr(unsafe.Pointer(&corner)), 4)
-		none := uint32(dwmColorNone) // the border is drawn by renderFlyout
-		pDwmSetWindowAttribute.Call(a.hwndFly, dwmwaBorderColor, uintptr(unsafe.Pointer(&none)), 4)
-	}
 
 	name, _, _ := pRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(utf16("TaskbarCreated"))))
 	a.msgTBar = uint32(name)
 }
 
-// rounded: Windows 11 rounds top-level windows; Windows 10 keeps them square.
+// rounded: Windows 11 flyouts have rounded corners; Windows 10 keeps them square.
 func (a *app) rounded() bool { return a.build >= 22000 }
 
 // --- tray icon ------------------------------------------------------------
@@ -285,7 +282,7 @@ func (a *app) reloadTheme() {
 		}
 	}
 	a.accent = accent
-	pInvalidateRect.Call(a.hwndFly, 0, 0)
+	a.invalidate()
 }
 
 func (a *app) showMenu() {
@@ -395,7 +392,7 @@ func (a *app) monitorsChanged() {
 			}
 		}
 	}
-	pInvalidateRect.Call(a.hwndFly, 0, 0)
+	a.invalidate()
 	a.updateTray()
 }
 
@@ -622,15 +619,17 @@ func (a *app) showFlyout() {
 	if behind != 0 {
 		insert = behind
 	}
-	pSetWindowPos.Call(a.hwndFly, insert, uintptr(sx), uintptr(sy), uintptr(w), uintptr(h), swpShowWindow)
+	// A layered window shows whatever it was last given, so place it and
+	// draw it while it is still hidden, then show it.
+	pSetWindowPos.Call(a.hwndFly, insert, uintptr(sx), uintptr(sy), uintptr(w), uintptr(h), swpNoActivate)
+	a.redraw()
+	pSetWindowPos.Call(a.hwndFly, insert, 0, 0, 0, 0, swpNoMove|swpNoSize|swpShowWindow)
 	pSetForegroundWindow.Call(a.hwndFly)
 	pSetFocus.Call(a.hwndFly)
 	if behind != 0 {
 		// Activating brought it to the top; tuck it back under the taskbar.
 		pSetWindowPos.Call(a.hwndFly, behind, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoActivate)
 	}
-	pInvalidateRect.Call(a.hwndFly, 0, 0)
-	pUpdateWindow.Call(a.hwndFly) // paint now, before the first frame of the slide
 	if sx != x || sy != y {
 		a.startSlide(x, y, dx, dy, behind)
 	}
@@ -677,7 +676,7 @@ func (a *app) setPct(i, pct int) {
 	}
 	a.rows[i].pct = pct
 	a.ddc.set(a.gen, i, pct)
-	pInvalidateRect.Call(a.hwndFly, 0, 0)
+	a.invalidate()
 }
 
 func (a *app) ensureFonts() {
@@ -723,27 +722,41 @@ func (a *app) makeFont(sizeDip float64, weight uintptr) uintptr {
 	return create("Segoe UI")
 }
 
-func (a *app) paint(hwnd uintptr) {
-	var ps paintStruct
-	hdc, _, _ := pBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
-	defer pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
-
-	var rc rect
-	pGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
-	w, h := int(rc.right), int(rc.bottom)
-	if hdc == 0 || w <= 0 || h <= 0 {
+// invalidate asks for a redraw once the current message is handled. Like
+// InvalidateRect for an ordinary window, several requests in a row draw once.
+func (a *app) invalidate() {
+	if a.redrawPending {
 		return
 	}
+	a.redrawPending = true
+	pPostMessageW.Call(a.hwndFly, msgRedraw, 0, 0)
+}
+
+// redraw renders the flyout and hands it to the layered window, which keeps
+// no other copy of its contents. The corners are cut out here (cutCorners)
+// rather than rounded by DWM: DWM gives the windows it rounds a shadow of
+// its own, which showed below the flyout once it landed above the taskbar.
+func (a *app) redraw() {
+	a.redrawPending = false
+	if !a.visible {
+		return
+	}
+	w, h := flyoutSize(len(a.rows), a.scale)
+	screen, _, _ := pGetDC.Call(0)
+	if screen == 0 {
+		return
+	}
+	defer pReleaseDC.Call(0, screen)
 
 	bi := bitmapInfoHeader{biWidth: int32(w), biHeight: -int32(h), biPlanes: 1, biBitCount: 32}
 	bi.biSize = uint32(unsafe.Sizeof(bi))
 	var bits unsafe.Pointer
-	bmp, _, _ := pCreateDIBSection.Call(hdc, uintptr(unsafe.Pointer(&bi)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
+	bmp, _, _ := pCreateDIBSection.Call(screen, uintptr(unsafe.Pointer(&bi)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
 	if bmp == 0 || bits == nil {
 		return
 	}
 	defer pDeleteObject.Call(bmp)
-	mem, _, _ := pCreateCompatibleDC.Call(hdc)
+	mem, _, _ := pCreateCompatibleDC.Call(screen)
 	defer pDeleteDC.Call(mem)
 	oldBmp, _, _ := pSelectObject.Call(mem, bmp)
 	defer pSelectObject.Call(mem, oldBmp)
@@ -781,8 +794,19 @@ func (a *app) paint(hwnd uintptr) {
 		pDrawTextW.Call(mem, uintptr(unsafe.Pointer(utf16(t.s))), ^uintptr(0), uintptr(unsafe.Pointer(&t.box)), flags)
 	}
 	pSelectObject.Call(mem, oldFont)
+	pGdiFlush.Call()
 
-	pBitBlt.Call(hdc, 0, 0, uintptr(w), uintptr(h), mem, 0, 0, srcCopy)
+	radius := 0.0
+	if model.rounded {
+		radius = cornerR * a.scale
+	}
+	cv.cutCorners(radius)
+
+	size := [2]int32{int32(w), int32(h)} // SIZE
+	var src point
+	blend := [4]byte{0, 0, 255, 1} // AC_SRC_OVER, no flags, opaque, AC_SRC_ALPHA
+	pUpdateLayeredWindow.Call(a.hwndFly, screen, 0, uintptr(unsafe.Pointer(&size)), mem,
+		uintptr(unsafe.Pointer(&src)), 0, uintptr(unsafe.Pointer(&blend)), ulwAlpha)
 }
 
 func keyDown(vk uintptr) bool {
@@ -796,7 +820,13 @@ func flyProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	case wmEraseBkgnd:
 		return 1
 	case wmPaint:
-		a.paint(hwnd)
+		// Nothing to paint: redraw feeds the layered window directly.
+		var ps paintStruct
+		pBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+		pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+		return 0
+	case msgRedraw:
+		a.redraw()
 		return 0
 	case msgSlide:
 		a.stepSlide(wParam, lParam != 0)
@@ -818,7 +848,7 @@ func flyProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 				a.drag, a.focus, a.keyboard = i, i, false
 				pSetCapture.Call(hwnd)
 				a.setPct(i, pctFromX(g, float64(x)))
-				pInvalidateRect.Call(hwnd, 0, 0)
+				a.invalidate()
 			}
 		}
 		return 0
@@ -835,7 +865,7 @@ func flyProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		}
 		if hover != a.hover {
 			a.hover = hover
-			pInvalidateRect.Call(hwnd, 0, 0)
+			a.invalidate()
 		}
 		if !a.tracking {
 			tme := trackMouseEventT{dwFlags: tmeLeave, hwndTrack: hwnd}
@@ -849,19 +879,19 @@ func flyProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		a.tracking = false
 		if a.hover != -1 {
 			a.hover = -1
-			pInvalidateRect.Call(hwnd, 0, 0)
+			a.invalidate()
 		}
 		return 0
 
 	case wmLButtonUp:
 		a.endDrag()
-		pInvalidateRect.Call(hwnd, 0, 0)
+		a.invalidate()
 		return 0
 
 	case wmCaptureChanged:
 		if a.drag >= 0 {
 			a.drag = -1
-			pInvalidateRect.Call(hwnd, 0, 0)
+			a.invalidate()
 		}
 		return 0
 
@@ -923,7 +953,7 @@ func flyProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			return 0
 		}
 		a.keyboard = true
-		pInvalidateRect.Call(hwnd, 0, 0)
+		a.invalidate()
 		return 0
 	}
 	r, _, _ := pDefWindowProcW.Call(hwnd, msg, wParam, lParam)

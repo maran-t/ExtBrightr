@@ -43,11 +43,9 @@ var (
 	pSetWindowPos                  = user32.NewProc("SetWindowPos")
 	pSetForegroundWindow           = user32.NewProc("SetForegroundWindow")
 	pSetFocus                      = user32.NewProc("SetFocus")
-	pInvalidateRect                = user32.NewProc("InvalidateRect")
-	pUpdateWindow                  = user32.NewProc("UpdateWindow")
+	pUpdateLayeredWindow           = user32.NewProc("UpdateLayeredWindow")
 	pBeginPaint                    = user32.NewProc("BeginPaint")
 	pEndPaint                      = user32.NewProc("EndPaint")
-	pGetClientRect                 = user32.NewProc("GetClientRect")
 	pGetCursorPos                  = user32.NewProc("GetCursorPos")
 	pScreenToClient                = user32.NewProc("ScreenToClient")
 	pSetCapture                    = user32.NewProc("SetCapture")
@@ -85,7 +83,6 @@ var (
 	pSelectObject       = gdi32.NewProc("SelectObject")
 	pDeleteObject       = gdi32.NewProc("DeleteObject")
 	pDeleteDC           = gdi32.NewProc("DeleteDC")
-	pBitBlt             = gdi32.NewProc("BitBlt")
 	pCreateFontW        = gdi32.NewProc("CreateFontW")
 	pSetBkMode          = gdi32.NewProc("SetBkMode")
 	pSetTextColor       = gdi32.NewProc("SetTextColor")
@@ -99,7 +96,6 @@ var (
 	pRegSetValueExW         = advapi32.NewProc("RegSetValueExW")
 	pRegDeleteValueW        = advapi32.NewProc("RegDeleteValueW")
 	pRegCloseKey            = advapi32.NewProc("RegCloseKey")
-	pDwmSetWindowAttribute  = dwmapi.NewProc("DwmSetWindowAttribute")
 	pDwmFlush               = dwmapi.NewProc("DwmFlush")
 	pGetDpiForMonitor       = shcore.NewProc("GetDpiForMonitor")
 	pRtlGetVersion          = ntdll.NewProc("RtlGetVersion")
@@ -133,6 +129,8 @@ const (
 	wsPopup         = 0x80000000
 	wsExTopmost     = 0x00000008
 	wsExToolWindow  = 0x00000080
+	wsExLayered     = 0x00080000
+	ulwAlpha        = 0x00000002
 	swHide          = 0
 	swpShowWindow   = 0x0040
 	swpNoActivate   = 0x0010
@@ -182,7 +180,6 @@ const (
 	dtNoPrefix     = 0x0800
 	dtEndEllipsis  = 0x8000
 	bkTransparent  = 1
-	srcCopy        = 0x00CC0020
 	cleartypeQual  = 5
 	defaultCharset = 1
 
@@ -192,11 +189,6 @@ const (
 	regSZ           = 1
 	rrfRtRegBinary  = 0x00000008
 	rrfRtRegDword   = 0x00000010
-
-	dwmwaCornerPreference = 33
-	dwmwaBorderColor      = 34
-	dwmwcpRound           = 2
-	dwmColorNone          = 0xFFFFFFFE
 
 	spiGetClientAreaAnimation = 0x1042
 )

@@ -41,6 +41,30 @@ func (c *canvas) fill(col rgb) {
 	}
 }
 
+// cutCorners turns the canvas into a rounded rectangle of radius r for a
+// per-pixel-alpha (layered) window: pixels past the corners become
+// transparent, the curve is anti-aliased, and everything else is made fully
+// opaque again, which also repairs the alpha that GDI text drawing clears.
+// Colours come out premultiplied, as UpdateLayeredWindow wants.
+func (c *canvas) cutCorners(r float64) {
+	W, H := float64(c.w), float64(c.h)
+	for y := 0; y < c.h; y++ {
+		for x := 0; x < c.w; x++ {
+			i := (y*c.w + x) * 4
+			px, py := float64(x)+0.5, float64(y)+0.5
+			if r <= 0 || (px >= r && px <= W-r) || (py >= r && py <= H-r) {
+				c.pix[i+3] = 255 // away from the corners
+				continue
+			}
+			a := clamp01(0.5 - sdRoundRect(px, py, 0, 0, W, H, r))
+			c.pix[i] = uint8(float64(c.pix[i])*a + 0.5)
+			c.pix[i+1] = uint8(float64(c.pix[i+1])*a + 0.5)
+			c.pix[i+2] = uint8(float64(c.pix[i+2])*a + 0.5)
+			c.pix[i+3] = uint8(255*a + 0.5)
+		}
+	}
+}
+
 // shade blends col over every pixel in the box, weighted by cover(px, py),
 // which is evaluated at pixel centres.
 func (c *canvas) shade(x0, y0, x1, y1 float64, col rgb, alpha float64, cover func(px, py float64) float64) {
@@ -208,6 +232,7 @@ const (
 	rowH      = 72.0
 	sliderY   = 52.0 // slider centre below the row top; the name sits at 4..28
 	padBottom = 10.0
+	cornerR   = 8.0 // Windows 11 flyout corner radius
 	emptyH    = 116.0
 	thumbR    = 10.0
 	glyphBox  = 20.0
@@ -242,7 +267,7 @@ type rowModel struct {
 
 type flyModel struct {
 	dark    bool
-	rounded bool // Windows 11: DWM rounds the window, so round the border too
+	rounded bool // Windows 11: round the corners (cutCorners) and the border
 	accent  rgb
 	scale   float64
 	rows    []rowModel
@@ -375,7 +400,7 @@ func renderFlyout(cv *canvas, m *flyModel) []textItem {
 	cv.fill(p.bg)
 	radius := 0.0
 	if m.rounded {
-		radius = 8 * s
+		radius = cornerR * s
 	}
 	cv.strokeRoundRect(0, 0, W, H, radius, 1, p.border, p.borderA)
 

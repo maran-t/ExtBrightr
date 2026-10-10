@@ -68,3 +68,35 @@ func TestRenderDump(t *testing.T) {
 		savePNG(t, filepath.Join(dir, "icon-"+string(rune('0'+n/10))+string(rune('0'+n%10))+".png"), toImage(pix, n, n, &taskbar))
 	}
 }
+
+func TestCutCorners(t *testing.T) {
+	w, h := 40, 30
+	cv := &canvas{pix: make([]byte, w*h*4), w: w, h: h}
+	cv.fill(rgb{200, 100, 50})
+	cv.pix[(15*w+20)*4+3] = 0 // as GDI leaves a text pixel
+	cv.cutCorners(8)
+	alpha := func(x, y int) byte { return cv.pix[(y*w+x)*4+3] }
+	if a := alpha(0, 0); a != 0 {
+		t.Errorf("corner pixel alpha %d, want 0", a)
+	}
+	if a := alpha(20, 15); a != 255 {
+		t.Errorf("text pixel alpha %d, want 255 again", a)
+	}
+	if a := alpha(20, 0); a != 255 {
+		t.Errorf("top edge alpha %d, want 255", a)
+	}
+	if a := alpha(2, 2); a == 0 || a == 255 {
+		t.Errorf("pixel on the curve alpha %d, want partial", a)
+	}
+	for i := 0; i < len(cv.pix); i += 4 {
+		if a := cv.pix[i+3]; cv.pix[i] > a || cv.pix[i+1] > a || cv.pix[i+2] > a {
+			t.Fatalf("pixel %d not premultiplied: %v", i/4, cv.pix[i:i+4])
+		}
+	}
+	square := &canvas{pix: make([]byte, w*h*4), w: w, h: h}
+	square.fill(white)
+	square.cutCorners(0)
+	if square.pix[3] != 255 {
+		t.Errorf("radius 0 should keep the corner, alpha %d", square.pix[3])
+	}
+}
