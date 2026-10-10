@@ -100,7 +100,6 @@ var (
 	pRegDeleteValueW        = advapi32.NewProc("RegDeleteValueW")
 	pRegCloseKey            = advapi32.NewProc("RegCloseKey")
 	pDwmSetWindowAttribute  = dwmapi.NewProc("DwmSetWindowAttribute")
-	pDwmExtendFrame         = dwmapi.NewProc("DwmExtendFrameIntoClientArea")
 	pDwmFlush               = dwmapi.NewProc("DwmFlush")
 	pGetDpiForMonitor       = shcore.NewProc("GetDpiForMonitor")
 	pRtlGetVersion          = ntdll.NewProc("RtlGetVersion")
@@ -117,9 +116,6 @@ const (
 	wmPaint          = 0x000F
 	wmEraseBkgnd     = 0x0014
 	wmSettingChange  = 0x001A
-	wmNcCalcSize     = 0x0083
-	wmNcHitTest      = 0x0084
-	wmNcActivate     = 0x0086
 	wmContextMenu    = 0x007B
 	wmDisplayChange  = 0x007E
 	wmKeyDown        = 0x0100
@@ -135,18 +131,14 @@ const (
 	wmApp            = 0x8000
 
 	wsPopup         = 0x80000000
-	wsCaption       = 0x00C00000
-	htClient        = 1
 	wsExTopmost     = 0x00000008
 	wsExToolWindow  = 0x00000080
-	csDropShadow    = 0x00020000
 	swHide          = 0
 	swpShowWindow   = 0x0040
 	swpNoActivate   = 0x0010
 	swpNoSize       = 0x0001
 	swpNoMove       = 0x0002
 	swpNoZOrder     = 0x0004
-	swpFrameChanged = 0x0020
 	gaRoot          = 2
 	idcArrow        = 32512
 	smCxSmIcon      = 49
@@ -201,7 +193,6 @@ const (
 	rrfRtRegBinary  = 0x00000008
 	rrfRtRegDword   = 0x00000010
 
-	dwmwaTransitionsOff   = 3 // DWMWA_TRANSITIONS_FORCEDISABLED
 	dwmwaCornerPreference = 33
 	dwmwaBorderColor      = 34
 	dwmwcpRound           = 2

@@ -71,8 +71,6 @@ type app struct {
 	fontScale float64
 	fonts     [3]uintptr
 
-	framed bool // the flyout has an (invisible) DWM frame: Windows 11
-
 	// The opening slide: the flyout rises from the taskbar into place.
 	sliding     bool
 	slideGen    uintptr
@@ -168,17 +166,9 @@ func (a *app) createWindows() {
 	mainClass.cbSize = uint32(unsafe.Sizeof(mainClass))
 	pRegisterClassExW.Call(uintptr(unsafe.Pointer(&mainClass)))
 
-	// On Windows 11 the flyout is a framed window whose frame has no size
-	// (see WM_NCCALCSIZE in flyProc): DWM gives only framed windows its own
-	// shadow, which is drawn with the window and so moves with it while it
-	// slides. Windows 10 keeps the class shadow.
-	a.framed = a.rounded()
-	flyClassStyle := uint32(0)
-	if !a.framed {
-		flyClassStyle = csDropShadow
-	}
+	// No shadow: the class shadow (CS_DROPSHADOW) is a separate window that
+	// does not follow the flyout while it slides and pops in when it lands.
 	flyClass := wndClassEx{
-		style:         flyClassStyle,
 		lpfnWndProc:   syscall.NewCallback(flyProc),
 		hInstance:     a.hInst,
 		hCursor:       cursor,
@@ -193,41 +183,19 @@ func (a *app) createWindows() {
 		uintptr(unsafe.Pointer(utf16(classMain))), uintptr(unsafe.Pointer(utf16(appTitle))),
 		wsPopup, 0, 0, 0, 0, 0, 0, a.hInst, 0)
 
-	flyStyle := uintptr(wsPopup)
-	if a.framed {
-		flyStyle |= wsCaption
-	}
 	a.hwndFly, _, _ = pCreateWindowExW.Call(wsExToolWindow|wsExTopmost,
 		uintptr(unsafe.Pointer(utf16(classFlyout))), uintptr(unsafe.Pointer(utf16(appTitle))),
-		flyStyle, 0, 0, 10, 10, a.hwndMain, 0, a.hInst, 0)
+		wsPopup, 0, 0, 10, 10, a.hwndMain, 0, a.hInst, 0)
 
-	if a.framed && available(pDwmSetWindowAttribute) {
-		a.setupFrame()
+	if a.rounded() && available(pDwmSetWindowAttribute) {
+		corner := uint32(dwmwcpRound)
+		pDwmSetWindowAttribute.Call(a.hwndFly, dwmwaCornerPreference, uintptr(unsafe.Pointer(&corner)), 4)
+		none := uint32(dwmColorNone) // the border is drawn by renderFlyout
+		pDwmSetWindowAttribute.Call(a.hwndFly, dwmwaBorderColor, uintptr(unsafe.Pointer(&none)), 4)
 	}
 
 	name, _, _ := pRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(utf16("TaskbarCreated"))))
 	a.msgTBar = uint32(name)
-}
-
-// setupFrame sets up the Windows 11 flyout's DWM frame: rounded corners,
-// no DWM border (renderFlyout draws its own) and no DWM open/close
-// animation (the flyout slides itself). A 1-pixel frame keeps the DWM
-// shadow on a window with no visible frame.
-func (a *app) setupFrame() {
-	set := func(attr uintptr, v uint32) {
-		pDwmSetWindowAttribute.Call(a.hwndFly, attr, uintptr(unsafe.Pointer(&v)), 4)
-	}
-	set(dwmwaTransitionsOff, 1)
-	set(dwmwaCornerPreference, dwmwcpRound)
-	set(dwmwaBorderColor, dwmColorNone)
-
-	if available(pDwmExtendFrame) {
-		margins := [4]int32{1, 1, 1, 1} // MARGINS
-		pDwmExtendFrame.Call(a.hwndFly, uintptr(unsafe.Pointer(&margins)))
-	}
-	// Recalculate the (empty) frame now; this also makes DWM pick up the
-	// attributes above.
-	pSetWindowPos.Call(a.hwndFly, 0, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoZOrder|swpNoActivate|swpFrameChanged)
 }
 
 // rounded: Windows 11 rounds top-level windows; Windows 10 keeps them square.
@@ -833,22 +801,6 @@ func flyProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	case msgSlide:
 		a.stepSlide(wParam, lParam != 0)
 		return 0
-
-	case wmNcCalcSize:
-		if a != nil && a.framed {
-			return 0 // no frame: the client area is the whole window
-		}
-	case wmNcHitTest:
-		if a != nil && a.framed {
-			return htClient // nothing to drag or resize
-		}
-	case wmNcActivate:
-		if a != nil && a.framed {
-			// Let DWM switch the frame between active and inactive, but
-			// skip repainting a caption that is not there.
-			r, _, _ := pDefWindowProcW.Call(hwnd, msg, wParam, ^uintptr(0))
-			return r
-		}
 
 	case wmActivate:
 		if loword(wParam) == 0 { // WA_INACTIVE: clicked elsewhere
